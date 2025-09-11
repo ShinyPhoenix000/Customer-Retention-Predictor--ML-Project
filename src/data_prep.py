@@ -32,8 +32,21 @@ class DataPreparation:
         numerical_features = self.preprocessing_config.get('numerical_features', [])
         categorical_features = self.preprocessing_config.get('categorical_features', [])
         
+        # Validate features exist in dataframe
+        all_features = numerical_features + categorical_features
+        missing_features = [f for f in all_features if f not in df.columns]
+        if missing_features:
+            raise ValueError(f"Features not found in data: {missing_features}")
+        
         if not numerical_features and not categorical_features:
             raise ValueError("No features specified in preprocessing config!")
+
+        # Validate data is not empty
+        if df.empty:
+            raise ValueError("Input DataFrame is empty!")
+            
+        # Drop rows with all missing values
+        df = df.dropna(how='all')
 
         # Create transformers for numerical and categorical features
         numeric_transformer = Pipeline(steps=[
@@ -66,8 +79,58 @@ class DataPreparation:
         
         return processed_data, preprocessor
 
-    def split_data(self, X, y, test_size=0.2):
-        """Split data into train and test sets."""
-        return train_test_split(
-            X, y, test_size=test_size, random_state=self.random_state
-        )
+    def prepare_target(self, df, target_column):
+        """
+        Prepare target variable by converting Yes/No to 1/0.
+        """
+        if target_column not in df.columns:
+            raise ValueError(f"Target column '{target_column}' not found in data")
+            
+        # Create mapping dictionary
+        target_map = {'Yes': 1, 'No': 0}
+        
+        # Convert target and validate
+        y = df[target_column].map(target_map)
+        if y.isna().any():
+            invalid_values = df[target_column][~df[target_column].isin(target_map.keys())].unique()
+            raise ValueError(f"Invalid values in target column: {invalid_values}")
+            
+        return y
+
+    def split_data(self, X, y, test_size=0.2, val_size=None):
+        """
+        Split data into train, validation and test sets.
+        
+        Args:
+            X: Features DataFrame
+            y: Target Series
+            test_size: Proportion of data for test set
+            val_size: Proportion of training data for validation. If None, only do train/test split.
+            
+        Returns:
+            If val_size is None:
+                Tuple of (X_train, X_test, y_train, y_test)
+            If val_size is provided:
+                Tuple of (X_train, X_val, X_test, y_train, y_val, y_test)
+        """
+        if val_size is None:
+            # Only do train/test split
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=test_size, random_state=self.random_state, stratify=y
+            )
+            return X_train, X_test, y_train, y_test
+        else:
+            # First split into train+val and test
+            X_train_val, X_test, y_train_val, y_test = train_test_split(
+                X, y, test_size=test_size, random_state=self.random_state, stratify=y
+            )
+            
+            # Then split train into train and validation
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_train_val, y_train_val, 
+                test_size=val_size,
+                random_state=self.random_state,
+                stratify=y_train_val
+            )
+            
+            return X_train, X_val, X_test, y_train, y_val, y_test

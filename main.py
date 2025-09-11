@@ -1,17 +1,10 @@
 """
-Customer Retention Predictor - Main Script
+Customer Retention Predictor
 
-This script orchestrates the ML pipeline for predicting customer churn:
-1. Loads and preprocesses customer data
-2. Trains an XGBoost model
-3. Evaluates model performance
-4. Generates SHAP-based explanations
-5. Makes predictions on new data
-
-Usage:
-    python main.py --config config/config.yaml --mode train
-    python main.py --config config/config.yaml --mode predict
-    python main.py --config config/config.yaml --mode explain
+Machine learning pipeline that predicts and explains customer churn using:
+- XGBoost classification
+- SHAP explanations 
+- Feature importance analysis
 """
 
 import argparse
@@ -32,10 +25,8 @@ from src.model import CustomerRetentionModel
 from src.explain import ModelExplainer
 from src.utils import setup_logging, load_config, save_metrics
 
-# Set up rich console for pretty printing
 console = Console()
 logger = logging.getLogger(__name__)
-from sklearn.preprocessing import LabelEncoder
 
 
 def find_latest_experiment(base_dir: str) -> Optional[Path]:
@@ -48,16 +39,28 @@ def find_latest_experiment(base_dir: str) -> Optional[Path]:
     Returns:
         Optional[Path]: Path to latest experiment directory, or None if no experiments exist
     """
-    base_path = Path(base_dir)
-    if not base_path.exists():
-        return None
+    try:
+        base_path = Path(base_dir).resolve()  # Get absolute path
+        if not base_path.exists():
+            logger.warning(f"Base directory {base_dir} does not exist")
+            return None
         
-    experiments = [d for d in base_path.iterdir() if d.is_dir() and d.name.startswith('experiment_')]
-    if not experiments:
-        return None
+        # Find experiment dirs that have a model.pkl file
+        experiments = [d for d in base_path.iterdir() 
+                      if d.is_dir() and 
+                      d.name.startswith('experiment_') and
+                      (d / 'models' / 'model.pkl').exists()]
         
-    latest_experiment = max(experiments, key=lambda x: x.stat().st_mtime)
-    return latest_experiment
+        if not experiments:
+            logger.warning(f"No experiment directories with trained models found in {base_dir}")
+            return None
+            
+        latest_experiment = max(experiments, key=lambda d: datetime.strptime(d.name, 'experiment_%Y%m%d_%H%M%S'))
+        logger.info(f"Found latest experiment: {latest_experiment}")
+        return latest_experiment
+    except Exception as e:
+        logger.error(f"Error finding latest experiment: {str(e)}")
+        return None
 
 def setup_experiment_dir(base_dir: str) -> Path:
     """
@@ -69,7 +72,6 @@ def setup_experiment_dir(base_dir: str) -> Path:
     Returns:
         Path: Path to created experiment directory
     """
-    # Create timestamped directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = f"experiment_{timestamp}"
     exp_dir = Path(base_dir) / exp_name
@@ -149,7 +151,6 @@ def parse_arguments() -> argparse.Namespace:
     
     args = parser.parse_args()
 
-    # Verify config file exists
     config_path = Path(args.config)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {args.config}")
@@ -172,30 +173,22 @@ def train_model(config: Dict[str, Any], data_prep: DataPreparation,
     Returns:
         Tuple[CustomerRetentionModel, ModelExplainer]: Trained model and explainer
     """
-    # Load and preprocess data
-    print("\n1. Loading and preprocessing data...")
+    logger.info("Loading and preprocessing data...")
     raw_data = data_prep.load_data(config['data_path'])
-    print(f"Loaded raw data shape: {raw_data.shape}")
+    logger.info(f"Raw data shape: {raw_data.shape}")
     
-    # Verify features from config exist in data
     feature_config = config['data_prep']['preprocessing']
     numerical_features = feature_config['numerical_features']
     categorical_features = feature_config['categorical_features']
     
-    # Validate features exist in dataset
     all_features = numerical_features + categorical_features
     missing_features = [f for f in all_features if f not in raw_data.columns]
     if missing_features:
         raise ValueError(f"Missing features in dataset: {missing_features}")
     
-    print("\nFeatures to be used:")
-    print("Numerical features:", ', '.join(numerical_features))
-    print("Categorical features:", ', '.join(categorical_features))
-    
-    # Preprocess data
+    logger.info(f"Features: {len(numerical_features)} numerical, {len(categorical_features)} categorical")
     processed_data, transformer = data_prep.preprocess_data(raw_data)
-    print(f"\nProcessed data shape: {processed_data.shape}")
-    print(f"Processed features: {', '.join(processed_data.columns)}")
+    logger.info(f"Processed data shape: {processed_data.shape}")
 
     # Convert target to numeric and split data
     print("\n2. Preparing target variable...")
@@ -203,27 +196,27 @@ def train_model(config: Dict[str, Any], data_prep: DataPreparation,
     if target_col not in raw_data.columns:
         raise ValueError(f"Target column '{target_col}' not found in dataset")
         
-    target = convert_target_to_numeric(raw_data[target_col])
+    print("\nConverting target from Yes/No to 1/0")
+    print("Original value counts:")
+    logger.info(f"Target distribution:\n{raw_data[target_col].value_counts().to_string()}")
     
-    print("\n3. Splitting data into train/test sets...")
-    # Split data into train and test sets
-    X_train, X_test, y_train, y_test = data_prep.split_data(
-        processed_data,
-        target
-    )
-    print(f"Train set shape: {X_train.shape}")
-    print(f"Test set shape: {X_test.shape}")
-
-    # Further split training data for validation
+    target = data_prep.prepare_target(raw_data, target_col)
+    logger.info(f"Converted target distribution:\n{target.value_counts().to_string()}")
+    
+    logger.info("Splitting data into train/test/validation sets")
     validation_size = config.get('training', {}).get('validation_size', 0.2)
-    if validation_size > 0:
-        split_size = int(len(X_train) * (1 - validation_size))
-        X_train, X_val = X_train[:split_size], X_train[split_size:]
-        y_train, y_val = y_train[:split_size], y_train[split_size:]
-        print(f"Validation set shape: {X_val.shape}")
+    test_size = config.get('training', {}).get('test_size', 0.2)
     
-    # Save preprocessed datasets
-    print("\nSaving preprocessed datasets...")
+    X_train, X_val, X_test, y_train, y_val, y_test = data_prep.split_data(
+        processed_data,
+        target,
+        test_size=test_size,
+        val_size=validation_size
+    )
+    
+    logger.info(f"Data splits - Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+    
+    logger.info("Saving preprocessed datasets")
     preprocessed_dir = experiment_dir / 'processed_data'
     preprocessed_dir.mkdir(exist_ok=True)
     
@@ -236,59 +229,51 @@ def train_model(config: Dict[str, Any], data_prep: DataPreparation,
         pd.DataFrame(X_val, columns=processed_data.columns).to_csv(preprocessed_dir / 'X_val.csv', index=False)
         pd.Series(y_val).to_csv(preprocessed_dir / 'y_val.csv', index=False)
     
-    print(f"Saved preprocessed datasets to: {preprocessed_dir}")
+    logger.info(f"Saved preprocessed datasets to: {preprocessed_dir}")
 
-    # Initialize and train model
-    print("\n4. Training XGBoost model...")
+    logger.info("Training XGBoost model")
     model_config = config.get('model', {})
     model = CustomerRetentionModel(model_config)
     
-    # Train with early stopping using validation set if available
-    print("Starting model training...")
     if validation_size > 0:
-        print("Using validation set for early stopping...")
+        logger.info("Training with validation set for early stopping")
         model.train(X_train, y_train, X_val, y_val)
     else:
-        print("Training on full training set...")
+        logger.info("Training on full training set")
         model.train(X_train, y_train)
 
-    # Evaluate model
-    print("\n5. Evaluating model on test set...")
+    logger.info("Evaluating model on test set")
     metrics = model.evaluate(X_test, y_test)
     
-    # Print and save metrics
-    print("\nModel Performance Metrics:")
+    logger.info("Model Performance Metrics:")
     for metric, value in metrics.items():
-        print(f"{metric}: {value:.4f}")
+        logger.info(f"{metric}: {value:.4f}")
     
     metrics_path = experiment_dir / 'metrics.json'
     save_metrics(metrics, metrics_path)
-    print(f"\nSaved metrics to: {metrics_path}")
+    logger.info(f"Saved metrics to: {metrics_path}")
 
-    # Create model directory and save model
     model_dir = experiment_dir / 'models'
     model_dir.mkdir(exist_ok=True)
     model_path = model_dir / 'model.pkl'
     model.save_model(model_path)
-    print(f"\nSaved trained model to: {model_path}")
+    logger.info(f"Saved trained model to: {model_path}")
 
-    # Generate model explanations
-    print("\n6. Generating SHAP explanations...")
-    print("Creating feature importance plot...")
+    logger.info("Generating SHAP explanations")
+    for subdir in ['plots', 'models', 'processed_data']:
+        (experiment_dir / subdir).mkdir(parents=True, exist_ok=True)
     
     feature_names = processed_data.columns.tolist()
     explainer = ModelExplainer(model, feature_names)
     explainer.initialize_explainer(X_train)
     
-    # Generate and save feature importance plot
-    plot_path = experiment_dir / 'feature_importance.png'
+    plot_path = experiment_dir / 'plots' / 'feature_importance.png'
     feature_importance = explainer.generate_feature_importance(
         X_test,
         plot=True,
         save_path=plot_path
     )
     
-    # Sort and print feature importance
     sorted_importance = sorted(
         feature_importance.items(), 
         key=lambda x: abs(x[1]), 
@@ -318,30 +303,33 @@ def predict(config: Dict[str, Any], data_prep: DataPreparation,
         experiment_dir (Path): Directory to save outputs
         as_labels (bool): Whether to output Yes/No instead of 1/0
     """
-    # Find the latest experiment if no specific model path is given
+    logger.info("Looking for trained model")
     if 'model_path' not in config:
         latest_exp = find_latest_experiment(config.get('results_dir', 'results/'))
         if latest_exp is None:
             raise FileNotFoundError("No trained model found. Please train a model first.")
         model_path = latest_exp / 'models' / 'model.pkl'
+        logger.info(f"Using latest trained model from: {model_path}")
     else:
-        model_path = Path(config['model_path'])
+        model_path = Path(config['model_path']).resolve()
+        if model_path.is_dir():
+            model_path = model_path / 'model.pkl'
+        logger.info(f"Using model specified in config: {model_path}")
     
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
+    elif not model_path.is_file():
+        raise ValueError(f"Model path does not point to a file: {model_path}")
     
-    # Load model
-    print("\n1. Loading trained model...")
+    logger.info("Loading model")
     model = CustomerRetentionModel(config.get('model', {}))
-    model.load_model(model_path)
-    print(f"Loaded model from: {model_path}")
+    model.load_model(str(model_path))
+    logger.info(f"Successfully loaded model from: {model_path}")
 
-    # Load and preprocess new data
-    print("\n2. Loading and preprocessing new data...")
+    logger.info("Loading and preprocessing new data")
     raw_data = data_prep.load_data(config['data_path'])
-    print(f"Loaded data shape: {raw_data.shape}")
+    logger.info(f"Loaded data shape: {raw_data.shape}")
     
-    # Verify all required features are present
     feature_config = config['data_prep']['preprocessing']
     numerical_features = feature_config['numerical_features']
     categorical_features = feature_config['categorical_features']
@@ -351,29 +339,27 @@ def predict(config: Dict[str, Any], data_prep: DataPreparation,
     if missing_features:
         raise ValueError(f"Missing features in dataset: {missing_features}")
     
-    print("\nFeatures to be used:")
-    print("Numerical features:", ', '.join(numerical_features))
-    print("Categorical features:", ', '.join(categorical_features))
+    logger.info(f"Features: {len(numerical_features)} numerical, {len(categorical_features)} categorical")
     
-    # Preprocess data
     processed_data, _ = data_prep.preprocess_data(raw_data)
-    print(f"\nProcessed data shape: {processed_data.shape}")
-    print(f"Processed features: {', '.join(processed_data.columns)}")
+    logger.info(f"Processed data shape: {processed_data.shape}")
 
-    # Generate predictions
-    print("\n3. Generating predictions...")
+    logger.info("Generating predictions")
     predictions = model.predict(processed_data)
     
-    # Convert to labels if requested
-    if as_labels:
-        predictions = np.where(predictions == 1, 'Yes', 'No')
-    
-    # Save and display predictions
     output_path = experiment_dir / 'predictions.csv'
-    pd.DataFrame(predictions, columns=['prediction']).to_csv(output_path, index=False)
-    print(f"\nPrediction counts:")
-    print(pd.Series(predictions).value_counts())
-    print(f"\nSaved predictions to: {output_path}")
+    save_predictions(predictions, output_path, as_labels)
+    
+    if as_labels:
+        pred_map = {0: 'No', 1: 'Yes'}
+        summary = pd.Series(predictions).map(pred_map).value_counts()
+    else:
+        summary = pd.Series(predictions).value_counts()
+    
+    logger.info("Prediction Summary:")
+    for label, count in summary.items():
+        logger.info(f"{label}: {count} ({count/len(predictions)*100:.1f}%)")
+    logger.info(f"Saved predictions to: {output_path}")
 
 def explain_predictions(config: Dict[str, Any], data_prep: DataPreparation,
                       experiment_dir: Path) -> None:
@@ -392,7 +378,7 @@ def explain_predictions(config: Dict[str, Any], data_prep: DataPreparation,
         raise FileNotFoundError(f"Model file not found: {model_path}")
     
     model = CustomerRetentionModel(config.get('model', {}))
-    model.load(model_path)
+    model.load_model(str(model_path))  # Use load_model instead of load
 
     # Load and preprocess data
     logger.info("Loading and preprocessing data...")
@@ -405,14 +391,13 @@ def explain_predictions(config: Dict[str, Any], data_prep: DataPreparation,
     explainer = ModelExplainer(model, feature_names)
     explainer.initialize_explainer(processed_data)
     
-    for plot_type in config.get('explainability', {}).get('shap_plots', ['summary']):
-        plot_path = experiment_dir / f'shap_{plot_type}.png'
-        explainer.generate_feature_importance(
-            processed_data,
-            plot_type=plot_type,
-            save_path=plot_path
-        )
-        logger.info(f"Saved {plot_type} plot to {plot_path}")
+    # Generate and save feature importance plots
+    plot_path = experiment_dir / 'plots' / 'feature_importance.png'
+    explainer.generate_feature_importance(
+        processed_data,
+        save_path=plot_path
+    )
+    logger.info(f"Saved feature importance plot to {plot_path}")
 
 def main() -> None:
     """Main execution function."""
@@ -501,29 +486,47 @@ def main() -> None:
         # Load trained model
         model_config = config.get('model', {})
         model = CustomerRetentionModel(model_config)
-        model.load(config.get('model_path'))
+        model.load_model(str(Path(config.get('model_path'))))
 
         # Load and preprocess new data
         raw_data = data_prep.load_data(config['data_path'])
         processed_data, _ = data_prep.preprocess_data(raw_data)
-        predictions = model.predict(processed_data[config['data_prep']['feature_columns']])
+        
+        # Make predictions using all features from preprocessed data
+        predictions = model.predict(processed_data)
 
-        print("Predictions:", predictions)
+        print("\nPrediction Summary:")
+        unique, counts = np.unique(predictions, return_counts=True)
+        total = len(predictions)
+        for label, count in zip(unique, counts):
+            percentage = (count / total) * 100
+            print(f"{'No' if label == 0 else 'Yes'}: {count} ({percentage:.1f}%)")
 
     elif args.mode == 'explain':
         # Load model and explain
         model_config = config.get('model', {})
         model = CustomerRetentionModel(model_config)
-        model.load(config.get('model_path'))
+        model.load_model(str(Path(config.get('model_path'))))
 
-        explainer = ModelExplainer(model, config['data_prep']['feature_columns'])
+        # Load and preprocess data
         raw_data = data_prep.load_data(config['data_path'])
         processed_data, _ = data_prep.preprocess_data(raw_data)
-        explainer.initialize_explainer(processed_data[config['data_prep']['feature_columns']])
-        explainer.generate_feature_importance(
-            processed_data[config['data_prep']['feature_columns']],
-            save_path=experiment_dir / 'feature_importance.png'
+        
+        # Initialize explainer with feature names
+        feature_names = processed_data.columns.tolist()
+        explainer = ModelExplainer(model, feature_names)
+        explainer.initialize_explainer(processed_data)
+        
+        # Generate feature importance
+        plot_path = experiment_dir / 'plots' / 'feature_importance.png'
+        importance_dict = explainer.generate_feature_importance(
+            processed_data,
+            save_path=plot_path
         )
+        
+        logger.info("\nFeature Importance Summary:")
+        for feat, imp in list(sorted(importance_dict.items(), key=lambda x: abs(x[1]), reverse=True))[:10]:
+            logger.info(f"{feat}: {imp:.4f}")
 
 
 if __name__ == '__main__':
