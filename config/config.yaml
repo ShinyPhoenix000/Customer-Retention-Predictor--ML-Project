@@ -1,0 +1,64 @@
+# config/config.yaml
+
+# Directory paths
+results_dir: "results/"
+data_path: "data/raw/customer_data.csv"
+model_path: "models/xgboost_model.pkl"
+logs_dir: "logs/"
+
+# Random seed for reproducibility
+random_state: 42
+
+# Data preparation configuration
+data_prep:
+  feature_columns:
+    - "tenure"
+    - "monthly_charges"
+    - "total_charges"
+    - "contract_type"
+    - "payment_method"
+    - "online_security"
+    - "online_backup"
+    - "internet_service"
+    - "tech_support"
+    - "streaming_tv"
+    - "streaming_movies"
+    - "gender"
+    - "senior_citizen"
+    - "partner"
+    - "dependents"
+    - "phone_service"
+    - "multiple_lines"
+    - "paperless_billing"
+
+  target_column: "churn"
+
+  preprocessing:
+    numerical_features:
+      - "tenure"
+      - "monthly_charges"
+      - "total_charges"
+    categorical_features:
+      - "contract_type"
+      - "payment_method"
+      - "internet_service"
+      - "online_security"
+      - "online_backup"
+      - "tech_support"
+      - "streaming_tv"
+      - "streaming_movies"
+      - "gender"
+      - "partner"
+      - "dependents"
+      - "phone_service"
+      - "multiple_lines"
+      - "paperless_billing"
+    scaling: "standard"
+    handle_missing: "median"
+
+explainability:
+  shap_plots:
+    - "summary"
+    - "dependence"
+    - "force"
+  num_background_samples: 100
